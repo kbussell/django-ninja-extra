@@ -5,11 +5,26 @@ From DjangoRestFramework - https://github.com/encode/django-rest-framework/blob/
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple, cast
 
+from asgiref.sync import sync_to_async
 from django.core.cache import cache as default_cache
 from django.core.exceptions import ImproperlyConfigured
 from django.http import HttpRequest
 
 from ninja_extra.conf import settings
+
+
+def _get_user(request: HttpRequest, is_async: bool = False):
+    """ Helper function to access `request.user` from within async contexts """
+
+    async def _get_user_async(request: HttpRequest):
+        from django.contrib.auth.middleware import get_user
+
+        return await sync_to_async(get_user)(request)
+
+    if is_async:
+        return _get_user_async(request)
+    else:
+        return request.user
 
 
 class BaseThrottle:
@@ -27,7 +42,7 @@ class BaseThrottle:
         self.num_requests: Optional[int] = None
         self.duration: Optional[int] = None
 
-    def allow_request(self, request: HttpRequest) -> bool:
+    def allow_request(self, request: HttpRequest, is_async: bool = False) -> bool:
         """
         Return `True` if the request should be allowed, `False` otherwise.
         """
@@ -78,11 +93,12 @@ class SimpleRateThrottle(BaseThrottle):
     cache_format: str = "throttle_%(scope)s_%(ident)s"
     scope: Optional[str] = None
 
-    def __init__(self) -> None:
+    def __init__(self, is_async: bool = False) -> None:
         super(SimpleRateThrottle, self).__init__()
         if not getattr(self, "rate", None):
             self.rate = self.get_rate()
         self.num_requests, self.duration = self.parse_rate(self.rate)
+        self.is_async = is_async
 
     def get_cache_key(self, request: HttpRequest) -> Optional[str]:
         """
@@ -123,7 +139,7 @@ class SimpleRateThrottle(BaseThrottle):
         duration = {"s": 1, "m": 60, "h": 3600, "d": 86400}[period[0]]
         return num_requests, duration
 
-    def allow_request(self, request: HttpRequest) -> bool:
+    def allow_request(self, request: HttpRequest, is_async: bool = False) -> bool:
         """
         Implement the check to see if the request should be throttled.
 
@@ -137,7 +153,10 @@ class SimpleRateThrottle(BaseThrottle):
         if self.key is None:
             return True
 
-        self.history = self.cache.get(self.key, [])
+        if self.is_async:
+            self.history = self.cache.aget(self.key, [])
+        else:
+            self.history = self.cache.get(self.key, [])
         self.now = self.timer()  # type:ignore
 
         # Drop any requests from the history which have now passed the
@@ -156,7 +175,10 @@ class SimpleRateThrottle(BaseThrottle):
         into the cache.
         """
         self.history.insert(0, self.now)
-        self.cache.set(self.key, self.history, self.duration)
+        if self.is_async:
+            self.cache.aset(self.key, self.history, self.duration)
+        else:
+            self.cache.set(self.key, self.history, self.duration)
         return True
 
     def throttle_failure(self) -> bool:
@@ -193,7 +215,8 @@ class AnonRateThrottle(SimpleRateThrottle):
     scope = "anon"
 
     def get_cache_key(self, request: HttpRequest) -> Optional[str]:
-        if request.user and request.user.is_authenticated:
+        user = _get_user(request, self.is_async)
+        if user and user.is_authenticated:
             return None  # Only throttle unauthenticated requests.
 
         return self.cache_format % {
@@ -214,8 +237,9 @@ class UserRateThrottle(SimpleRateThrottle):
     scope = "user"
 
     def get_cache_key(self, request: HttpRequest) -> Optional[str]:
-        if request.user and request.user.is_authenticated:
-            ident = request.user.pk
+        user = _get_user(request, self.is_async)
+        if user and user.is_authenticated:
+            ident = user.pk
         else:
             ident = self.get_ident(request)
 
@@ -239,8 +263,9 @@ class DynamicRateThrottle(SimpleRateThrottle):
         Otherwise generate the unique cache key by concatenating the user id
         with the `.throttle_scope` property of the view.
         """
-        if request.user and request.user.is_authenticated:
-            ident = request.user.pk
+        user = _get_user(request, self.is_async)
+        if user and user.is_authenticated:
+            ident = user.pk
         else:
             ident = self.get_ident(request)
 

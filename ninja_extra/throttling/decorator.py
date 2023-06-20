@@ -36,6 +36,7 @@ def _run_throttles(
     *throttle_classes: Type[BaseThrottle],
     request_or_controller: Union[HttpRequest, ControllerBase],
     response: HttpResponse = None,
+    is_async: bool = False,
     **init_kwargs: Any,
 ) -> None:
     """
@@ -56,7 +57,7 @@ def _run_throttles(
 
     for throttle_class in throttle_classes:
         throttling: BaseThrottle = throttle_class(**init_kwargs)
-        if not throttling.allow_request(request):
+        if not throttling.allow_request(request, is_async):
             # Filter out `None` values which may happen in case of config / rate
             duration = throttling.wait()
             if duration is not None:
@@ -92,6 +93,7 @@ def _sync_inject_throttling_handler(
             *throttle_classes,
             request_or_controller=request_or_controller,
             response=ctx.response if ctx else None,
+            is_async=False,
             **init_kwargs,
         )
 
@@ -115,6 +117,7 @@ def _async_inject_throttling_handler(
             *throttle_classes,
             request_or_controller=request_or_controller,
             response=ctx.response if ctx else None,
+            is_async=True,
             **init_kwargs,
         )
 
